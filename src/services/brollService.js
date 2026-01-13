@@ -29,8 +29,17 @@ export const processVideo = async (aRollPath, bRollPaths) => {
           pythonExecutable = 'python';
         }
       } else {
-        // Linux/Render: use system python3 (dependencies installed globally)
-        pythonExecutable = 'python3';
+        // Linux/Render: try venv first (where packages are actually installed)
+        const venvPython = path.resolve('src/.venv/bin/python3');
+        try {
+          require('fs').accessSync(venvPython);
+          pythonExecutable = venvPython;
+          logger.info(`[B-Roll Service] Using virtual environment Python: ${venvPython}`);
+        } catch (err) {
+          // Fallback to system python3
+          pythonExecutable = 'python3';
+          logger.info(`[B-Roll Service] Virtual env not found, using system Python`);
+        }
       }
     }
 
