@@ -11,7 +11,25 @@ export const processVideo = async (aRollPath, bRollPaths) => {
   return new Promise((resolve, reject) => {
     
     const pythonScriptPath = path.join(__dirname, '../python/broll_engine.py');
-    const pythonExecutable = path.resolve('src/python/venv/Scripts/python.exe');
+    
+    // Use system Python or environment variable
+    let pythonExecutable = process.env.PYTHON_PATH || 'python3';
+    
+    // Fallback to virtual environment if available
+    if (!process.env.PYTHON_PATH) {
+      const isWindows = process.platform === 'win32';
+      const venvPython = isWindows 
+        ? path.resolve('src/python/venv/Scripts/python.exe')
+        : path.resolve('src/python/venv/bin/python');
+      
+      // Check if venv exists, otherwise use system python
+      try {
+        require('fs').accessSync(venvPython);
+        pythonExecutable = venvPython;
+      } catch (err) {
+        pythonExecutable = isWindows ? 'python' : 'python3';
+      }
+    }
 
     const args = [
       pythonScriptPath,
