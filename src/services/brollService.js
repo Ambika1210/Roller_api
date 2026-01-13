@@ -15,19 +15,22 @@ export const processVideo = async (aRollPath, bRollPaths) => {
     // Use system Python or environment variable
     let pythonExecutable = process.env.PYTHON_PATH || 'python3';
     
-    // Fallback to virtual environment if available
+    // On Render, try different Python executables
     if (!process.env.PYTHON_PATH) {
       const isWindows = process.platform === 'win32';
-      const venvPython = isWindows 
-        ? path.resolve('src/python/venv/Scripts/python.exe')
-        : path.resolve('src/python/venv/bin/python');
       
-      // Check if venv exists, otherwise use system python
-      try {
-        require('fs').accessSync(venvPython);
-        pythonExecutable = venvPython;
-      } catch (err) {
-        pythonExecutable = isWindows ? 'python' : 'python3';
+      if (isWindows) {
+        // Windows: try venv first, then system python
+        const venvPython = path.resolve('src/python/venv/Scripts/python.exe');
+        try {
+          require('fs').accessSync(venvPython);
+          pythonExecutable = venvPython;
+        } catch (err) {
+          pythonExecutable = 'python';
+        }
+      } else {
+        // Linux/Render: use system python3 (dependencies installed globally)
+        pythonExecutable = 'python3';
       }
     }
 
@@ -38,6 +41,8 @@ export const processVideo = async (aRollPath, bRollPaths) => {
     ];
 
     logger.info(`[B-Roll Service] Spawning Python Process: ${pythonExecutable}`);
+    logger.info(`[B-Roll Service] Python script path: ${pythonScriptPath}`);
+    logger.info(`[B-Roll Service] Args: ${args.join(' ')}`);
 
     const pythonProcess = spawn(pythonExecutable, args);
 
