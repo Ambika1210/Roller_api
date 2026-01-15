@@ -29,16 +29,30 @@ export const processVideo = async (aRollPath, bRollPaths) => {
           pythonExecutable = 'python';
         }
       } else {
-        // Linux/Render: try venv first (where packages are actually installed)
-        const venvPython = path.resolve('src/.venv/bin/python3');
-        try {
-          require('fs').accessSync(venvPython);
-          pythonExecutable = venvPython;
-          logger.info(`[B-Roll Service] Using virtual environment Python: ${venvPython}`);
-        } catch (err) {
-          // Fallback to system python3
+        // Linux/Render: try multiple venv locations
+        const venvLocations = [
+          'src/.venv/bin/python3',           // Render's venv location
+          '.venv/bin/python3',                // Alternative venv location
+          'src/python/venv/bin/python3'      // Manual venv location
+        ];
+        
+        let found = false;
+        for (const venvPath of venvLocations) {
+          const resolvedPath = path.resolve(venvPath);
+          try {
+            require('fs').accessSync(resolvedPath);
+            pythonExecutable = resolvedPath;
+            logger.info(`[B-Roll Service] Using virtual environment Python: ${resolvedPath}`);
+            found = true;
+            break;
+          } catch (err) {
+            // Try next location
+          }
+        }
+        
+        if (!found) {
           pythonExecutable = 'python3';
-          logger.info(`[B-Roll Service] Virtual env not found, using system Python`);
+          logger.warn(`[B-Roll Service] No virtual env found, using system Python. This may cause import errors.`);
         }
       }
     }
