@@ -74,12 +74,13 @@ class ReasoningLayer:
         
         print(f"[DEBUG] Transcript (First 500 chars): {transcript_text[:500]}...")
         
-        prompt = self._construct_prompt(transcript_text, broll_descriptions)
+        system_prompt, user_prompt = self._construct_prompts(transcript_text, broll_descriptions)
         
-        llm_result = self._call_llm(prompt)
+        llm_result = self._call_llm(system_prompt, user_prompt)
         
         # Log debug info
-        print(f"[DEBUG] Prompt Length: {len(prompt)}")
+        print(f"[DEBUG] System Prompt Length: {len(system_prompt)}")
+        print(f"[DEBUG] User Prompt Length: {len(user_prompt)}")
         print(f"[DEBUG] Transcript Preview: {transcript_text[:200]}")
         print(f"[DEBUG] B-Roll Count: {len(brolls)}")
 
@@ -95,47 +96,67 @@ class ReasoningLayer:
     def _format_broll_list(self, brolls: List[Dict]) -> str:
         return "\n".join([f"ID: {b['id']}, Desc: {b['description']}" for b in brolls])
 
-    def _construct_prompt(self, transcript_text: str, broll_descriptions: str) -> str:
-        return f"""
-You are an Expert Video Editor. Analyze the provided A-roll transcript and B-roll descriptions.
+    def _construct_prompts(self, transcript_text: str, broll_descriptions: str) -> Tuple[str, str]:
+        """Returns (system_prompt, user_prompt) tuple for better LLM guidance."""
+        
+        system_prompt = """You are an Expert Video Editor specializing in B-roll insertion for content creation. Your expertise includes:
 
-Your Constraints:
-1. You MUST insert at least one B-roll if available, regardless of match quality.
-2. Match B-roll visually to keywords. If B-roll description is generic, matching it to any relevant segment is allowed.
-3. Max B-roll duration: 5 seconds.
-4. Minimum gap between two B-rolls: 2 seconds.
-5. No restrictions on Intro/Outro for now.
-6. Output Format: Strict JSON only.
+- Semantic analysis of spoken content to identify visual opportunities
+- Strategic placement of supplementary footage to enhance storytelling
+- Technical understanding of video editing constraints and best practices
 
-A-Roll Transcript:
+CORE PRINCIPLES:
+1. MANDATORY INSERTION: You MUST insert at least one B-roll clip if any are available, regardless of semantic match quality
+2. VISUAL RELEVANCE: Prioritize B-roll that visually supports or illustrates the spoken content
+3. TIMING PRECISION: Respect technical constraints for seamless integration
+4. ENGAGEMENT OPTIMIZATION: Place B-roll during natural speech pauses or emphasis points
+
+TECHNICAL CONSTRAINTS:
+- Maximum B-roll duration: 5 seconds per insertion
+- Minimum gap between insertions: 2 seconds
+- B-roll can overlay any part of the A-roll timeline
+- Generic B-roll descriptions can match any contextually relevant segment
+
+OUTPUT REQUIREMENTS:
+- Respond ONLY with valid JSON
+- No explanatory text outside the JSON structure
+- Include reasoning for each insertion decision"""
+
+        user_prompt = f"""Analyze this A-roll transcript and available B-roll footage to create an optimal insertion plan.
+
+A-ROLL TRANSCRIPT:
 {transcript_text}
 
-Available B-Rolls:
+AVAILABLE B-ROLL FOOTAGE:
 {broll_descriptions}
 
-Return JSON with this structure:
+Create a JSON response with this exact structure:
 {{
   "insertions": [
     {{
-      "start_sec": float,
-      "duration_sec": float,
-      "broll_id": string,
-      "reason": string
+      "start_sec": <float_timestamp>,
+      "duration_sec": <float_duration_max_5>,
+      "broll_id": "<matching_broll_id>",
+      "reason": "<brief_explanation_of_visual_relevance>"
     }}
   ]
 }}
-"""
 
-    def _call_llm(self, prompt: str) -> Dict:
+Remember: You MUST include at least one insertion if B-roll is available."""
+
+        return system_prompt, user_prompt
+
+    def _call_llm(self, system_prompt: str, user_prompt: str) -> Dict:
         try:
-            # Updated for OpenAI v1.x
+            # Updated for OpenAI v1.x with separate system and user prompts
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that outputs JSON."},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.2
+                temperature=0.1,  # Lower temperature for more consistent JSON output
+                max_tokens=1000   # Reasonable limit for JSON responses
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] Raw LLM Response: {content}")
