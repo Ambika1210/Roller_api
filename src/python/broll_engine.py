@@ -6,11 +6,14 @@ from typing import List, Dict, Tuple
 from openai import OpenAI
 from config import Config
 
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
 Config.validate()
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
 class PerceptionLayer:
-    """Handles parsing of A-roll and B-roll media."""
+    """Handles parsing of A-roll and B-roll media using Vision AI."""
 
     def transcribe_audio(self, video_path: str) -> List[Dict]:
         """Orchestrates the transcription process."""
@@ -25,21 +28,42 @@ class PerceptionLayer:
             return []
 
     def analyze_broll(self, broll_paths: List[str]) -> List[Dict]:
-        """Analyzes B-roll clips to generate metadata."""
-        print(f"[Perception] Analyzing {len(broll_paths)} B-roll clips...")
-        return [self._process_single_broll(path, i) for i, path in enumerate(broll_paths)]
+        """Analyzes B-roll clips to generate metadata using Vision AI."""
+        print(f"[Perception] Analyzing {len(broll_paths)} B-roll clips with Vision AI...")
+        results = []
+        for i, path in enumerate(broll_paths):
+            try:
+                results.append(self._process_single_broll_vision(path, i))
+            except Exception as e:
+                print(f"[Perception] Failed to analyze {path}: {e}")
+                # Fallback to simple filename based
+                results.append(self._process_single_broll_fallback(path, i))
+        return results
 
     def _extract_audio(self, video_path: str, output_path: str = "temp_audio.mp3") -> str:
-        """Extracts audio from video file."""
-        from moviepy.editor import VideoFileClip
-        video = VideoFileClip(video_path)
-        video.audio.write_audiofile(output_path, logger=None)
+        """Extracts audio from video file using direct ffmpeg."""
+        import subprocess
+        import imageio_ffmpeg
+        
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        
+        cmd = [
+            ffmpeg_exe,
+            "-y", # Overwrite
+            "-i", video_path,
+            "-vn", # No video
+            "-acodec", "libmp3lame",
+            "-q:a", "2",
+            output_path
+        ]
+        
+        # Run silently to avoid stdout buffer crushing
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return output_path
 
     def _call_whisper_api(self, audio_path: str) -> List[Dict]:
         """Calls OpenAI Whisper API."""
         with open(audio_path, "rb") as audio_file:
-            # Updated for OpenAI v1.x
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", 
                 file=audio_file, 
@@ -51,15 +75,113 @@ class PerceptionLayer:
         if os.path.exists(path):
             os.remove(path)
 
-    def _process_single_broll(self, path: str, index: int) -> Dict:
-        """Processes a single B-roll file."""
+    def _process_single_broll_vision(self, path: str, index: int) -> Dict:
+        """Processes a single B-roll file using Vision AI."""
+        print(f"[Perception] meaningful visual analysis for: {os.path.basename(path)}")
+        
+        # 1. Extract Frames (Start, Middle, End)
+        base64_frames = self._extract_frames(path)
+        
+        # 2. Get Description from LLM
+        description = self._get_visual_description(base64_frames)
+        
+        return {
+            "id": f"broll_{index}",
+            "path": path,
+            "description": description, 
+            "filename": os.path.basename(path)
+        }
+
+    def _process_single_broll_fallback(self, path: str, index: int) -> Dict:
         filename = os.path.basename(path)
         return {
             "id": f"broll_{index}",
             "path": path,
-            "description": f"Visuals related to {filename}. General stock footage suitable for illustration.", 
+            "description": f"Visuals related to {filename} (Analysis Failed)", 
             "filename": filename
         }
+
+    def _extract_frames(self, video_path: str) -> List[str]:
+        """Extracts 3 representative frames using ffmpeg directly."""
+        import subprocess
+        import imageio_ffmpeg
+        import base64
+        import os
+        
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        duration = self._get_duration(video_path)
+        
+        times = [duration * 0.1, duration * 0.5, duration * 0.9]
+        encoded_frames = []
+        
+        for i, t in enumerate(times):
+            temp_img = f"temp_frame_{i}.jpg"
+            cmd = [
+                ffmpeg_exe,
+                "-y",
+                "-ss", str(t),
+                "-i", video_path,
+                "-frames:v", "1",
+                "-q:v", "2",
+                temp_img
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.path.exists(temp_img):
+                    with open(temp_img, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("utf-8")
+                        encoded_frames.append(b64)
+                    os.remove(temp_img)
+            except Exception as e:
+                print(f"[Perception] Frame extract failed: {e}")
+                
+        return encoded_frames
+
+    def _get_duration(self, video_path: str) -> float:
+        import subprocess
+        import imageio_ffmpeg
+        import re
+        
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        cmd = [ffmpeg_exe, "-i", video_path]
+        
+        # ffmpeg prints info to stderr
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='ignore')
+        
+        # Parse duration "Duration: 00:00:05.12"
+        match = re.search(r"Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})", result.stderr)
+        if match:
+            h, m, s = map(float, match.groups())
+            return h * 3600 + m * 60 + s
+        return 10.0 # Fallback
+
+    def _get_visual_description(self, base64_frames: List[str]) -> str:
+        """Sends frames to GPT-4o for analysis."""
+        
+        # Prepare content with images
+        content = [
+            {"type": "text", "text": "These are frames from a video clip. Describe the visual content, mood, and potential context in 2-3 sentences. Focus on objects, actions, and lighting."}
+        ]
+        
+        for b64 in base64_frames:
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{b64}",
+                    "detail": "low"
+                }
+            })
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini", # Cost effective vision model
+            messages=[
+                {"role": "user", "content": content}
+            ],
+            max_tokens=100
+        )
+        
+        return response.choices[0].message.content
 
 
 class ReasoningLayer:
@@ -81,7 +203,6 @@ class ReasoningLayer:
         # Log debug info
         print(f"[DEBUG] System Prompt Length: {len(system_prompt)}")
         print(f"[DEBUG] User Prompt Length: {len(user_prompt)}")
-        print(f"[DEBUG] Transcript Preview: {transcript_text[:200]}")
         print(f"[DEBUG] B-Roll Count: {len(brolls)}")
 
         return llm_result
@@ -94,55 +215,54 @@ class ReasoningLayer:
         return "\n".join([f"[{get_val(seg, 'start'):.2f}-{get_val(seg, 'end'):.2f}] {get_val(seg, 'text')}" for seg in transcript])
 
     def _format_broll_list(self, brolls: List[Dict]) -> str:
-        return "\n".join([f"ID: {b['id']}, Desc: {b['description']}" for b in brolls])
+        # Using the rich 'description' field from Vision AI
+        return "\n".join([f"ID: {b['id']}\n   Visuals: {b['description']}\n" for b in brolls])
 
     def _construct_prompts(self, transcript_text: str, broll_descriptions: str) -> Tuple[str, str]:
         """Returns (system_prompt, user_prompt) tuple for better LLM guidance."""
         
-        system_prompt = """You are an Expert Video Editor specializing in B-roll insertion for content creation. Your expertise includes:
+        system_prompt = """You are an Expert Video Editor specializing in B-roll insertion.
 
-- Semantic analysis of spoken content to identify visual opportunities
-- Strategic placement of supplementary footage to enhance storytelling
-- Technical understanding of video editing constraints and best practices
+YOUR GOAL:
+Analyze the spoken content (A-roll) and the available visual footage (B-roll) to create a seamless, engaging video. 
 
-CORE PRINCIPLES:
-1. MANDATORY INSERTION: You MUST insert at least one B-roll clip if any are available, regardless of semantic match quality
-2. VISUAL RELEVANCE: Prioritize B-roll that visually supports or illustrates the spoken content
-3. TIMING PRECISION: Respect technical constraints for seamless integration
-4. ENGAGEMENT OPTIMIZATION: Place B-roll during natural speech pauses or emphasis points
+MATCHING LOGIC:
+1. **Semantic Matching**: Look for deeper connections than just keywords. 
+   - Example directly mentioned: Speaker says "I love coffee" -> Match with clip of coffee.
+   - Example thematic: Speaker says "The morning rush is crazy" -> Match with clip of traffic or busy streets.
+   - Example emotional: Speaker says "I felt so peaceful" -> Match with clip of a calm sunset.
 
-TECHNICAL CONSTRAINTS:
-- Maximum B-roll duration: 5 seconds per insertion
-- Minimum gap between insertions: 2 seconds
-- B-roll can overlay any part of the A-roll timeline
-- Generic B-roll descriptions can match any contextually relevant segment
+2. **Visual Continuity**: Ensure the selected B-roll actually fits the context described.
 
-OUTPUT REQUIREMENTS:
-- Respond ONLY with valid JSON
-- No explanatory text outside the JSON structure
-- Include reasoning for each insertion decision"""
+CONSTRAINTS:
+- Max B-roll duration: 4-5 seconds.
+- Min duration: 2 seconds.
+- Avoid inserting B-roll when the speaker is likely introducing themselves or doing a direct call-to-action (unless visuals match perfectly).
+- **Mandatory**: You MUST act if there are good matches. Do not return empty unless absolutely nothing matches.
 
-        user_prompt = f"""Analyze this A-roll transcript and available B-roll footage to create an optimal insertion plan.
+JSON OUTPUT FORMAT:
+Output ONLY valid JSON.
+{
+  "insertions": [
+    {
+      "start_sec": <float>,
+      "duration_sec": <float>,
+      "broll_id": "<id>",
+      "reason": "<Explain WHY this specific visual fits this specific spoken text>",
+      "confidence": <float between 0.0 and 1.0>
+    }
+  ]
+}"""
+
+        user_prompt = f"""START PLANNING.
 
 A-ROLL TRANSCRIPT:
 {transcript_text}
 
-AVAILABLE B-ROLL FOOTAGE:
+AVAILABLE B-ROLL FOOTAGE (Analyzed by Vision AI):
 {broll_descriptions}
 
-Create a JSON response with this exact structure:
-{{
-  "insertions": [
-    {{
-      "start_sec": <float_timestamp>,
-      "duration_sec": <float_duration_max_5>,
-      "broll_id": "<matching_broll_id>",
-      "reason": "<brief_explanation_of_visual_relevance>"
-    }}
-  ]
-}}
-
-Remember: You MUST include at least one insertion if B-roll is available."""
+Create the insertion plan JSON."""
 
         return system_prompt, user_prompt
 
@@ -150,19 +270,19 @@ Remember: You MUST include at least one insertion if B-roll is available."""
         try:
             # Updated for OpenAI v1.x with separate system and user prompts
             response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="gpt-3.5-turbo", # Can upgrade to gpt-4 if needed for better reasoning
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.1,  # Lower temperature for more consistent JSON output
-                max_tokens=1000   # Reasonable limit for JSON responses
+                temperature=0.2,
+                max_tokens=1500
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] Raw LLM Response: {content}")
             
             parsed = self._parse_llm_response(content)
-            parsed['_raw_response'] = content # Store raw response for debugging
+            parsed['_raw_response'] = content 
             return parsed
         except Exception as e:
             print(f"[Reasoning] Matching failed: {e}")
@@ -179,7 +299,6 @@ Remember: You MUST include at least one insertion if B-roll is available."""
             
             return json.loads(clean_content.strip())
         except Exception as e:
-             # Fallback if JSON parsing fails but content might be raw text
              print(f"[Reasoning] JSON parse failed: {e}")
              return {"insertions": []}
 
@@ -266,14 +385,16 @@ def main():
     # Internal log buffer
     logs = []
     def log(msg):
-        print(msg) 
+        print(msg, flush=True) 
         logs.append(msg)
+        sys.stdout.flush() # Force flush
 
     # Execution Flow
     log(f"[Engine] Processing A-Roll: {os.path.basename(args.a_roll)}")
     transcript = perception.transcribe_audio(args.a_roll)
     transcript_text = reasoning._format_transcript(transcript)
     log(f"[Engine] Transcript Length: {len(transcript_text)} chars")
+    log(f"[Engine] Full Transcript:\n{transcript_text}\n") # Added print
     if len(transcript_text) < 100:
         log(f"[Engine] WARNING: Transcript is very short: '{transcript_text}'")
 
